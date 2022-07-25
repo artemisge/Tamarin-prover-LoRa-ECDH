@@ -1,0 +1,274 @@
+theory LoRa_ECDH
+begin
+
+builtins: hashing, symmetric-encryption, asymmetric-encryption, signing, bilinear-pairing
+
+section{* LoRa_ECDH *}
+
+functions: PRF/1, hmac/2 [private]
+
+// ------Secure Channel Start------
+rule ChanOut_S [colour=ffffff]:
+    [ Out_S( $A, $B, x )]
+  --[ ChanOut_S( $A, $B, x ) ]->
+    [ Sec( $A, $B, x ) ]
+
+
+rule ChanIn_S [colour=ffffff]:
+    [ Sec( $A, $B, x ) ]
+  --[ ChanIn_S( $A, $B, x ) ]->
+    [ In_S( $A, $B, x ) ]
+
+// ------Secure Channel Stop-------
+
+// Device Initialization
+rule Device_Init:
+    [Fr(~DevLtk)]
+  --[EntityInit('ED', $ED), OnlyOnce('Device_Init')]->
+    [
+      !Ltk($ED, ~DevLtk), 
+      !Pk($ED, pk(~DevLtk)),
+      EDInitialised($ED),
+      //, !Pk($ED, pk(~DevLtk)) για κάποιο λόγο δεν τα θέλει
+      Out(pk(~DevLtk))
+    ]
+
+// Network Server
+rule NS_Init:
+    [Fr(~NSLtk)] 
+  --[EntityInit('NS', $NS), OnlyOnce('NS_Init')]->
+    [
+      !Ltk($NS, ~NSLtk), 
+      !Pk($NS, pk(~NSLtk)), 
+      Out(pk(~NSLtk)), 
+      !NSInitialised($NS)
+      //, !Pk($NS, pk(~NSLtk))
+    ]
+
+// Application Server
+rule AS_Init:
+    [Fr(~ASLtk)]
+  --[EntityInit('AS', $AS), OnlyOnce('AS_Init')]->
+    [
+      !Ltk($AS, ~ASLtk), 
+      !Pk($AS, pk(~ASLtk)), 
+      Out(pk(~ASLtk)), 
+      !ASInitialised($AS)
+      //, !Pk($AS, pk(~ASLtk))
+    ]
+
+// ED doesn't have a "!" to ensure that it will be connected with only one pair of servers.
+// On the other hand, servers can be connected to other EDs.
+rule Connect_All:
+  let
+    DevNtwPSK=h('DevNtw',~DevNtwKey)
+  in
+    [ 
+      Fr(~DevNtwKey),
+
+      EDInitialised($ED),
+      !NSInitialised($NS),
+      !ASInitialised($AS),
+
+      !Pk($ED, pkD),
+      !Pk($NS, pkNS),
+      !Pk($AS, pkAS)
+    ]
+  --[Linked_ED_With_NS_AS($ED, $NS, $AS), OnlyOnce('Device_Commisioned')]->
+  // PSKs shared as facts, not to the channel
+    [
+      EDCommissioned($ED, $NS, $AS, DevNtwPSK), 
+      NSCommissioned($ED, $NS, $AS, DevNtwPSK),
+      ASCommissioned($ED, $NS, $AS)
+    ]
+
+// Device Join Request to Network Server
+rule Device_1:
+  let
+    joinReq = <$ED, $NS, ~DevNonce>
+    MIC1 = hmac(DevNtwPSK, joinReq) //sign
+    //joinReq = <joinReqMsg, MIC1>
+  in
+    [
+      Fr(~DevNonce), 
+      EDCommissioned($ED, $NS, $AS, DevNtwPSK),
+
+      !Pk($ED, pkD),
+      !Pk($NS, pkNS),
+      !Pk($AS, pkAS)
+    ]
+  --[Dev1()]->
+    [
+      Out(<'Join_Request', 
+          senc{ joinReq, MIC1 }DevNtwPSK
+          >),
+      State_ED_1($ED, $NS, $AS, DevNtwPSK, ~DevNonce)
+    ]
+
+// 'params' = extra parameters that don't matter
+// NS receives Join Request message from Device
+// Sends back Join Accept
+// Sends new key to AS to establish a session between Dev-AS
+rule NtwServer_1:
+  let
+    joinReq = <$ED, $NS, DevNonce>
+    MIC1 = hmac(DevNtwPSK, joinReq) //sign
+
+    // generates two session keys AppSKey and NwkSKey 
+    AppSKey = h(~Key1, DevNtwPSK, ~AppNonce, $NS, DevNonce)
+    NtwSKey = h(~Key2, DevNtwPSK, ~AppNonce, $NS, DevNonce)
+
+    // prepares for the network server’s i-th nonce AppNoncei by eXclusive-ORing a 
+    // randomly generated nonce AppNonce with the received DevNoncei
+    joinAccMsg = <$DevEUI, $NS, h(~AppNonce, DevNonce)>
+    MIC2 = hmac(joinAccMsg, DevNtwPSK)
+    joinAcc = <joinAccMsg, MIC2>
+  in
+    [
+      NSCommissioned($ED, $NS, $AS, DevNtwPSK), 
+      In(<'Join_Request', 
+        senc{ joinReq, MIC1 }DevNtwPSK
+        >), 
+
+      !Pk($ED, pkD),
+      !Pk($NS, pkNS),
+      !Pk($AS, pkAS),
+
+      Fr(~AppNonce), 
+      Fr(~Key1), 
+      Fr(~Key2)
+    ]
+  --[
+      OnlyOnce('NetworkServer_Receive_JoinRequest_Forward_To_AS'),
+      Eq( MIC1, hmac(DevNtwPSK, joinReq) ),
+      NetworkServer1()
+    ]->
+    [
+      Out(<'Join_Accept', $ED, joinAcc>), 
+      State_NS_1($DevEUI, $NS, $AS, ~AppNonce), 
+      Out_S($NS, $AS, AppSKey)
+    ]
+
+// Device receives Join Accept message from NS
+rule Device_2:
+  let
+    // server messages:
+    joinAccMsg = <$ED, $NS, h(AppNonce, DevNonce)>
+    MIC2 = hmac(joinAccMsg, DevNtwPSK)
+    joinAcc = <joinAccMsg, MIC2>
+
+    AppSKey = h('AppKey', DevNtwPSK, AppNonce, $NS, DevNonce)
+    NtwSKey = h('NtwKey', DevNtwPSK, AppNonce, $NS, DevNonce)
+    
+    DP_d = pmult(~d, 'G')
+    Seq1 = h(AppSKey)
+    App_Auth_Req = <Seq1, DP_d, $AS, $ED>
+    MIC3 = hmac(AppSKey, App_Auth_Req)
+  in
+  // d: ECDH private key andpublic key: DP_d = d*G, G starting/base point
+    [
+      In(<'Join_Accept', $ED, joinAcc>), 
+      State_ED_1($ED, $NS, $AS, DevNtwPSK, DevNonce),
+      Fr(~d)
+    ]
+  --[
+      Dev2()
+    ]->
+    [
+      Out(<'App_Authentication_Request', 
+            App_Auth_Req, 
+            MIC3
+          >), 
+      State_ED_2($ED, $NS, $AS, ~d, DP_d, Seq1, AppSKey)
+    ]
+
+// PR_app : Private key of the application server
+// MIC4: digital signature, that's why it's signed by private key of App server, and it's not meant to be decrypted, only verified.
+rule AppServer_1:
+  let    
+    App_Auth_Req = <Seq1, DP_d, $AS, $ED>
+    DP_a = pmult(~a, 'G')
+
+    Seq2 = <Seq1,'1'>
+    SK = h(pmult(~a, DP_d), Seq2)
+
+    m = h(Seq2, $AS, $ED, DP_a, DP_d, SK)
+    MIC4 = sign(m, prkAS) //sign
+    App_Auth_Res = <Seq2, DP_a, m, MIC4>
+
+    MIC5 = hmac(AppSKey, App_Auth_Res)
+  in
+    [
+      Fr(~a), 
+
+      !Ltk($AS, prkAS), 
+      !Pk($AS, pkAS),
+      ASCommissioned($ED, $NS, $AS), 
+
+      In_S($NS, $AS, AppSKey),
+      In(<'App_Authentication_Request', $AS, App_Auth_Req, MIC3>)
+    ]
+  --[
+  // TODO: validate Seq1, MIC3
+      AppServer1()
+    ]->
+    [
+      Out(<'App_Authentication_Response', 
+            App_Auth_Res, 
+            MIC5
+          >), 
+      State_AS_1($ED, $NS, $AS, ~a, DP_a)
+    ]
+
+
+rule Device_3:
+  let
+    App_Auth_Res = <Seq2, DP_a, m, MIC4>
+
+    // Session Key
+    SK = h(pmult(d, DP_a), Seq2)
+
+    Seq3 = <Seq2, '1'>
+    //App_Auth_Ack = <Seq3, '1'>
+    MIC6 = hmac(SK, Seq3)
+  in
+    [
+      In(<'App_Authentication_Response', 
+          App_Auth_Res, 
+          MIC5
+        >), 
+      !Pk($AS, pkAS),
+      State_ED_2($ED, $NS, $AS, d, DP_d, Seq1, AppSKey)
+    ]
+  --[
+  // TODO Eq(Mic5, hmac(AppSKey, App_Auth_Res)) == true
+  // validate Mic4 with PU_app: verify(MIC4, m, pk(prk)) = true
+  // validate eq(Seq2, Seq1 + '1') == true
+      Dev3()
+    ]->
+    [Out(<'App_Authentication_Acknowledge', 
+          Seq3, 
+          MIC6
+        >)
+    ]
+
+
+
+
+
+axiom Eq_check_succeed: "All x y #i. Eq(x,y) @ i ==> x = y"
+
+lemma protocol_flow: exists-trace
+    "Ex #i #j #k #l #m. 
+      Dev1()@i & 
+      NetworkServer1()@j &
+      Dev2()@k & 
+      AppServer1()@l &
+      Dev3()@m & 
+      i < j & 
+      j < k &
+      k < l & 
+      l < m
+    "
+  
+end

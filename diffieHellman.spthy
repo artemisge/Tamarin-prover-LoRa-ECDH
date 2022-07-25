@@ -1,0 +1,48 @@
+theory diffieHellman begin
+
+builtins: diffie-hellman
+
+rule CreateIdentity:
+  let
+    publicKey = 'g'^privateKey:fresh
+  in
+    [Fr(privateKey:fresh)]-->
+    [!Identity(A:pub, privateKey:fresh, publicKey), Out(publicKey)]
+
+rule Sender_SendPublicKey:
+  [!Identity(sender:pub, senderPrivateKey:fresh,  senderPublicKey), !Identity(responder:pub, responderPrivateKey:fresh, responderPublicKey)]
+  -->[Out(<'initiate', sender:pub, responder:pub, senderPublicKey>)]
+
+rule Responder_GetPublicKey_CalculateSessionKey_SendPublicKey:
+  let
+    sessionKey = senderPublicKey^~responderPrivateKey
+  in
+    [!Identity($responder, ~responderPrivateKey, responderPublicKey), In (<'initiate', sender, $responder, senderPublicKey>)]
+  --[ResponderCreateSession($responder, sender, sessionKey)]->
+  [Session($responder, sender, sessionKey), Out(<'response', $responder, sender, responderPublicKey>)]
+
+rule Sender_GetPublicKey_CalculateSessionKey:
+  let
+    sessionKey = responderPublicKey^ ~senderPrivateKey
+  in
+    [!Identity($sender, ~senderPrivateKey, senderPublicKey), In(<'response', responder, $sender, responderPublicKey>)]
+    --[SenderCreateSession($sender, responder, sessionKey)]->
+    [Session($sender, responder, sessionKey)]
+
+lemma ManInTheMiddleAttack:
+"
+  All sender responder sessionKeySender sessionKeyResponder #i #j.
+  (
+    SenderCreateSession(sender, responder, sessionKeySender) @ #i
+    &
+    ResponderCreateSession(responder, sender, sessionKeyResponder) @ #j
+    &
+    #j < #i
+    & 
+    not (sender = responder)
+  )
+  ==> 
+  not ( Ex #k1 #k2 . K(sessionKeySender) @ #k1 & K(sessionKeyResponder) @ #k2 )
+"
+
+end
