@@ -49,12 +49,6 @@ rule Connect_All:
       EDInitialised($ED),
       NSInitialised($NS),
       ASInitialised($AS)
-
-      //DevNonce
-
-      //!Pk($ED, pkD),
-      //!Pk($NS, pkNS),
-      //!Pk($AS, pkAS)
     ]
   --[]->
   // PSKs shared as facts, not to the channel
@@ -67,26 +61,23 @@ rule Connect_All:
 // Device Join Request to Network Server
 rule Device_1:
   let
+    DevNonce = h(AppKey)
+    DevNoncei = <h(DevNonce), '1'>
+
     MIC1 = hmac('Join_Request', AppKey)
-    //DevNoncei = hmac(DevNonce) + '1'
   in
     [
-      Fr(~DevNonce), 
       EDCommissioned($ED, $NS, $AS, AppKey)
-
-      //!Pk($ED, pkD),
-      //!Pk($NS, pkNS),
-      //!Pk($AS, pkAS)
     ]
   --[Dev1()]->
     [
       Out(<'Join_Request',
           $AS,
           $ED,
-          ~DevNonce,
+          DevNoncei,
           MIC1
           >),
-      Device1($ED, $NS, $AS, AppKey, ~DevNonce)
+      Device1($ED, $NS, $AS, AppKey, DevNoncei)
     ]
 
 // 'params' = extra parameters that don't matter
@@ -95,18 +86,14 @@ rule Device_1:
 // Sends new key to AS to establish a session between Dev-AS
 rule NtwServer_1:
   let
-    MIC1 = hmac('Join_Request', AppKey)
+    //MIC1 = hmac('Join_Request', AppKey)
     //DevNoncei = hmac(DevNonce) + '1'
-    AppNoncei = h(~AppNonce, DevNonce)
-
-    // generates two session keys AppSKey and NwkSKey 
-    NtwSKey = senc(<'1', AppNoncei, 'NetID', DevNonce>, AppKey)
-    AppSKey = senc(<'2', AppNoncei, 'NetID', DevNonce>, AppKey)
-
-    // prepares for the network server’s i-th nonce AppNoncei by eXclusive-ORing a 
-    // randomly generated nonce AppNonce with the received DevNoncei
+    AppNoncei = h(~AppNonce, DevNoncei)
     MIC2 = hmac('Join_Accept', AppKey)
-    //Join_Accept = <AppNoncei, 'NetID', 'DevAddr', 'RFU', 'RxDelay', 'CFList', MIC2>
+
+    NtwSKey = senc(<'1', AppNoncei, 'NetID', DevNoncei>, AppKey)
+    AppSKey = senc(<'2', AppNoncei, 'NetID', DevNoncei>, AppKey)
+
     Join_Accept = <AppNoncei, 'details', MIC2>
   in
     [
@@ -114,7 +101,7 @@ rule NtwServer_1:
       In(<'Join_Request',
           $AS,
           $ED,
-          DevNonce,
+          DevNoncei,
           MIC1
           >), 
 
@@ -134,19 +121,17 @@ rule NtwServer_1:
           senc(Join_Accept, AppKey)
           >), 
 
-      Network1($ED, $NS, $AS, ~AppNonce), 
+      Network1($ED, $NS, $AS, AppNoncei), 
       Out(AppSKey)
     ]
 
 // Device receives Join Accept message from NS
 rule Device_2:
-  let
-    // server messages:      
-    MIC2 = hmac('Join_Accept', AppKey)
+  let     
     Join_Accept = <AppNoncei, 'details', MIC2>
 
-    NtwSKey = senc(<'1', AppNoncei, 'NetID', DevNonce>, AppKey)
-    AppSKey = senc(<'2', AppNoncei, 'NetID', DevNonce>, AppKey)
+    NtwSKey = senc(<'1', AppNoncei, 'NetID', DevNoncei>, AppKey)
+    AppSKey = senc(<'2', AppNoncei, 'NetID', DevNoncei>, AppKey)
     
     DP_d = pmult(~d, 'G') // corresponding public key
     Seq1 = h(AppSKey)    
@@ -159,7 +144,7 @@ rule Device_2:
           senc(Join_Accept, AppKey)
           >), 
 
-      Device1($ED, $NS, $AS, AppKey, DevNonce),
+      Device1($ED, $NS, $AS, AppKey, DevNoncei),
       Fr(~d) // private key randomly generated
     ]
   --[
@@ -180,6 +165,7 @@ rule AppServer_1:
 
     Seq2 = <Seq1,'1'>
     SK = h(pmult(~a, DP_d), Seq2)
+    //SK = pmult(~a, DP_d)
 
     m = h(Seq2, $AS, $ED, DP_d, DP_a, SK)
     MIC4 = aenc(m, ASLtk)
@@ -215,14 +201,12 @@ rule Device_3:
     SKDev = h(pmult(d, DP_a), Seq2)
 
     Seq3 = <Seq2, '1'>
-    MIC6 = hmac(Seq3, SKDev)
+    MIC6 = hmac('App_Auth_Ack', SKDev)
     App_Auth_Ack = <Seq3, MIC6>
-
-    test = pmult(d, DP_a)
   in
     [
       In(<'App_Auth_Res', App_Auth_Res>), 
-      !Pk($AS, pkAS),
+      //!Pk($AS, pk(ASLtk)),
       Device2($ED, $NS, $AS, d, DP_d, Seq1, AppSKey)
     ]
   --[
@@ -232,8 +216,20 @@ rule Device_3:
       Dev3()
     ]->
     [
-      Out(<'App_Auth_Ack'>)//, test>)//App_Auth_Ack>)
+      Out(<'App_Auth_Ack', App_Auth_Ack>)
     ]
+
+    // notes: trexei me auto: pmult(~d, 'DP_a')
+    // den trexei me auto: pmult(~d, DP_a)
+    // trexei me auto: DP_a
+    // trexei me pmult(1, DP_a)
+    // den trexei me auto: pmult(d,pmult(a, 'G'))
+    // den trexei me auto: pmult(1,pmult(a, 'G'))
+    // den trexei me auto: pmult(a, 'G')
+    // trexei me auto: pmult(~t, 'G'), Fr(~t)
+    // trexei me auto: pmult(~a, 'G') oxi sto flow
+    // trexei me auto: pmult(~d,pmult(~a, 'G'))oxi flow
+    // ?????????/
 
 
 lemma protocol_flow: exists-trace
@@ -242,11 +238,11 @@ lemma protocol_flow: exists-trace
       NetworkServer1()@j &
       Dev2()@k & 
       AppServer1()@l &
-      Dev3()@m & 
+      Dev3()@m /*& 
       #i < #j &
       #j < #k &
       #k < #l & 
-      #l < #m
+      #l < #m*/
     "
   
 end
